@@ -1,22 +1,17 @@
-local http = require("socket.http")
-local m = {}
-local _init = false
+multi,thread = require("multi"):init()
+THREAD = multi.integration.THREAD
+m = {}
 m.azlist = {}
-function m:init()
-    if _init then return end
-    _init = true
+m.init = THREAD:newFunction(function()
+    local http = require("socket.http")
     local list = http.request("http://www.mangareader.net/alphabetical")
-    self:_getList(list)
-    return self
-end
-function m:refresh()
-    _init=false;self:init()
-end
+    return list
+end)
 -- return title
-function m:getList()
-    return self.azlist
+function m.getList()
+    return m.azlist
 end
-function m:_getList(list)
+function m.storeList(list)
     local go = false
     local titles = {}
     for link,title in list:gmatch("<li><a href=\"([^\"]+)\">([^<]+)[^>]+></li>") do
@@ -27,10 +22,11 @@ function m:_getList(list)
             go = true
         end
     end
-    self.azlist = titles
+    m.azlist = titles
 end
 -- returns manga
-function m:getManga(title)
+m.getManga = THREAD:newFunction(function(title)
+    local http = require("socket.http")
     local manga = http.request(title.Link)
     local tab = {}
     tab.Cover = manga:match([[<div id="mangaimg"><img src="(.-)"]])
@@ -49,20 +45,46 @@ function m:getManga(title)
         end
     end
     return tab
-end
--- returns pages
-function m:getImage(pageurl)
+end)
+local queue = multi:newSystemThreadedJobQueue(16)
+queue:doToAll(function()
+    multi,thread = require("multi"):init()
+    http = require("socket.http") -- This is important
+end)
+queue:registerFunction("getImage",function(pageurl)
     local page = http.request(pageurl)
     return page:match([[id="imgholder.-src="([^"]*)]])
-end
-function m:getPages(manga,chapter)
+end)
+queue:registerFunction("getPages",function(manga,chapter)
     local tab = {}
     local page = http.request(manga.Chapters[chapter].Link)
     tab.pages = {page:match([[id="imgholder.-src="([^"]*)]])}
     tab.nextChapter = "http://www.mangareader.net"..page:match([[Next Chapter:.-href="([^"]*)]])
     for link,page in page:gmatch([[<option value="([^"]*)">(%d*)</option>]]) do
-        table.insert(tab.pages,self:getImage("http://www.mangareader.net"..link))
+        table.insert(tab.pages,getImage("http://www.mangareader.net"..link))
     end
     return tab
-end
+end)
+-- returns pages
+m.getPages = thread:newFunction(function(manga,chapter)
+    local http = require("socket.http")
+    local tab = {}
+    local cc = 0
+    local page = http.request(manga.Chapters[chapter].Link)
+    tab.pages = {page:match([[id="imgholder.-src="([^"]*)]])}
+    tab.nextChapter = "http://www.mangareader.net"..page:match([[Next Chapter:.-href="([^"]*)]])
+    local conn = queue.OnJobCompleted(function(jid,link)
+        table.insert(tab.pages,link)
+        cc=cc+1
+    end)
+    local count = 0
+    for link,page in page:gmatch([[<option value="([^"]*)">(%d*)</option>]]) do
+        queue:pushJob("getImage","http://www.mangareader.net"..link)
+        count = count + 1
+    end
+    thread.hold(function()
+        return count==cc
+    end)
+    return tab
+end)
 return m
